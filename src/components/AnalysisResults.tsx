@@ -1,12 +1,23 @@
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
-import { Download, AlertCircle, Activity, Leaf, TrendingUp, Shield } from 'lucide-react';
+import { Download, AlertCircle, Activity, Leaf, TrendingUp, Shield, Globe } from 'lucide-react';
 import { Progress } from '@/components/ui/progress';
 import { PieChart, Pie, Cell, ResponsiveContainer, Legend, Tooltip } from 'recharts';
 import jsPDF from 'jspdf';
 import html2canvas from 'html2canvas';
-import { useRef } from 'react';
+import { useRef, useState } from 'react';
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu';
+import { languages } from './LanguageSelector';
+import { supabase } from '@/integrations/supabase/client';
+import { useToast } from '@/hooks/use-toast';
 
 interface AnalysisData {
   diseaseName: string;
@@ -26,6 +37,7 @@ interface AnalysisResultsProps {
   data: AnalysisData;
   language: string;
   imagePreview: string;
+  onLanguageChange?: (newLanguage: string, newData: AnalysisData) => void;
 }
 
 const getSeverityColor = (severity: string) => {
@@ -48,18 +60,51 @@ const getSeverityData = (severity: string) => {
   return severityMap[severity as keyof typeof severityMap] || 50;
 };
 
-export const AnalysisResults = ({ data, language, imagePreview }: AnalysisResultsProps) => {
+export const AnalysisResults = ({ data, language, imagePreview, onLanguageChange }: AnalysisResultsProps) => {
   const resultsRef = useRef<HTMLDivElement>(null);
+  const [isGeneratingPDF, setIsGeneratingPDF] = useState(false);
+  const [currentData, setCurrentData] = useState(data);
+  const [currentLanguage, setCurrentLanguage] = useState(language);
+  const { toast } = useToast();
 
   const chartData = [
     { name: 'Confidence', value: data.confidence, color: 'hsl(var(--success))' },
     { name: 'Uncertainty', value: 100 - data.confidence, color: 'hsl(var(--muted))' },
   ];
 
-  const generatePDF = async () => {
+  const generatePDFInLanguage = async (selectedLanguage: string) => {
     if (!resultsRef.current) return;
 
+    setIsGeneratingPDF(true);
     try {
+      // If language is different, fetch new analysis
+      let dataToUse = currentData;
+      if (selectedLanguage !== currentLanguage) {
+        toast({
+          title: 'Translating...',
+          description: `Generating report in ${languages.find(l => l.code === selectedLanguage)?.name}`,
+        });
+
+        const { data: translatedData, error } = await supabase.functions.invoke('analyze-plant-disease', {
+          body: {
+            imageData: imagePreview,
+            language: selectedLanguage,
+          },
+        });
+
+        if (error) throw error;
+        dataToUse = translatedData;
+        setCurrentData(translatedData);
+        setCurrentLanguage(selectedLanguage);
+        
+        if (onLanguageChange) {
+          onLanguageChange(selectedLanguage, translatedData);
+        }
+
+        // Wait a bit for the UI to update
+        await new Promise(resolve => setTimeout(resolve, 500));
+      }
+
       const canvas = await html2canvas(resultsRef.current, {
         scale: 2,
         useCORS: true,
@@ -77,9 +122,23 @@ export const AnalysisResults = ({ data, language, imagePreview }: AnalysisResult
       const imgY = 10;
 
       pdf.addImage(imgData, 'PNG', imgX, imgY, imgWidth * ratio, imgHeight * ratio);
-      pdf.save(`plant-disease-report-${Date.now()}.pdf`);
+      
+      const languageName = languages.find(l => l.code === selectedLanguage)?.name || selectedLanguage;
+      pdf.save(`plant-disease-report-${languageName}-${Date.now()}.pdf`);
+      
+      toast({
+        title: 'PDF Downloaded',
+        description: `Report generated in ${languageName}`,
+      });
     } catch (error) {
       console.error('Error generating PDF:', error);
+      toast({
+        title: 'PDF Generation Failed',
+        description: error instanceof Error ? error.message : 'Failed to generate PDF',
+        variant: 'destructive',
+      });
+    } finally {
+      setIsGeneratingPDF(false);
     }
   };
 
@@ -87,23 +146,64 @@ export const AnalysisResults = ({ data, language, imagePreview }: AnalysisResult
     <div className="space-y-6">
       <div className="flex justify-between items-center">
         <h2 className="text-2xl font-bold text-foreground">Analysis Results</h2>
-        <Button onClick={generatePDF} className="gap-2">
-          <Download className="w-4 h-4" />
-          Download PDF Report
-        </Button>
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <Button disabled={isGeneratingPDF} className="gap-2">
+              {isGeneratingPDF ? (
+                <>
+                  <div className="w-4 h-4 border-2 border-primary-foreground border-t-transparent rounded-full animate-spin" />
+                  Generating...
+                </>
+              ) : (
+                <>
+                  <Download className="w-4 h-4" />
+                  Download PDF Report
+                </>
+              )}
+            </Button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end" className="w-56">
+            <DropdownMenuLabel className="flex items-center gap-2">
+              <Globe className="w-4 h-4" />
+              Select Language
+            </DropdownMenuLabel>
+            <DropdownMenuSeparator />
+            {languages.map((lang) => (
+              <DropdownMenuItem
+                key={lang.code}
+                onClick={() => generatePDFInLanguage(lang.code)}
+                className="cursor-pointer"
+              >
+                <span className="flex items-center justify-between w-full">
+                  <span>{lang.nativeName}</span>
+                  <span className="text-xs text-muted-foreground">{lang.name}</span>
+                </span>
+              </DropdownMenuItem>
+            ))}
+          </DropdownMenuContent>
+        </DropdownMenu>
       </div>
 
       <div ref={resultsRef} className="space-y-6 bg-background p-6 rounded-lg">
+        {/* Language indicator */}
+        <div className="flex items-center gap-2 text-sm text-muted-foreground">
+          <Globe className="w-4 h-4" />
+          <span>
+            Report Language: <span className="font-semibold text-foreground">
+              {languages.find(l => l.code === currentLanguage)?.nativeName}
+            </span>
+          </span>
+        </div>
         {/* Header Card */}
         <Card>
           <CardHeader>
             <div className="flex items-start justify-between">
               <div className="space-y-2">
-                <CardTitle className="text-2xl">{data.diseaseName}</CardTitle>
-                <CardDescription className="text-base">{data.scientificName}</CardDescription>
+                <CardTitle className="text-2xl">{currentData.diseaseName}</CardTitle>
+                <CardDescription className="text-base">{currentData.scientificName}</CardDescription>
               </div>
-              <Badge className={getSeverityColor(data.severity)}>
-                {data.severity.toUpperCase()}
+              <Badge className={getSeverityColor(currentData.severity)}>
+                {currentData.severity.toUpperCase()}
               </Badge>
             </div>
           </CardHeader>
@@ -111,11 +211,11 @@ export const AnalysisResults = ({ data, language, imagePreview }: AnalysisResult
             <div>
               <div className="flex items-center justify-between mb-2">
                 <span className="text-sm font-medium">Confidence Level</span>
-                <span className="text-sm font-bold text-primary">{data.confidence}%</span>
+                <span className="text-sm font-bold text-primary">{currentData.confidence}%</span>
               </div>
-              <Progress value={data.confidence} className="h-2" />
+              <Progress value={currentData.confidence} className="h-2" />
             </div>
-            <p className="text-foreground leading-relaxed">{data.description}</p>
+            <p className="text-foreground leading-relaxed">{currentData.description}</p>
           </CardContent>
         </Card>
 
@@ -184,12 +284,12 @@ export const AnalysisResults = ({ data, language, imagePreview }: AnalysisResult
                   </svg>
                   <div className="absolute inset-0 flex items-center justify-center">
                     <span className="text-3xl font-bold text-foreground">
-                      {getSeverityData(data.severity)}%
+                      {getSeverityData(currentData.severity)}%
                     </span>
                   </div>
                 </div>
                 <p className="text-sm text-muted-foreground">
-                  Spread Rate: <span className="font-semibold text-foreground">{data.spreadRate}</span>
+                  Spread Rate: <span className="font-semibold text-foreground">{currentData.spreadRate}</span>
                 </p>
               </div>
             </CardContent>
@@ -206,7 +306,7 @@ export const AnalysisResults = ({ data, language, imagePreview }: AnalysisResult
           </CardHeader>
           <CardContent>
             <ul className="space-y-2">
-              {data.symptoms.map((symptom, index) => (
+              {currentData.symptoms.map((symptom, index) => (
                 <li key={index} className="flex items-start gap-2">
                   <span className="text-primary mt-1">•</span>
                   <span className="text-foreground">{symptom}</span>
@@ -227,7 +327,7 @@ export const AnalysisResults = ({ data, language, imagePreview }: AnalysisResult
             </CardHeader>
             <CardContent>
               <div className="flex flex-wrap gap-2">
-                {data.affectedParts.map((part, index) => (
+                {currentData.affectedParts.map((part, index) => (
                   <Badge key={index} variant="secondary">
                     {part}
                   </Badge>
@@ -242,7 +342,7 @@ export const AnalysisResults = ({ data, language, imagePreview }: AnalysisResult
             </CardHeader>
             <CardContent>
               <ul className="space-y-2">
-                {data.causes.map((cause, index) => (
+                {currentData.causes.map((cause, index) => (
                   <li key={index} className="flex items-start gap-2">
                     <span className="text-primary mt-1">•</span>
                     <span className="text-foreground">{cause}</span>
@@ -263,7 +363,7 @@ export const AnalysisResults = ({ data, language, imagePreview }: AnalysisResult
           </CardHeader>
           <CardContent>
             <ol className="space-y-3">
-              {data.treatment.map((step, index) => (
+              {currentData.treatment.map((step, index) => (
                 <li key={index} className="flex items-start gap-3">
                   <span className="flex-shrink-0 w-6 h-6 rounded-full bg-primary text-primary-foreground flex items-center justify-center text-sm font-semibold">
                     {index + 1}
@@ -285,7 +385,7 @@ export const AnalysisResults = ({ data, language, imagePreview }: AnalysisResult
           </CardHeader>
           <CardContent>
             <ul className="space-y-2">
-              {data.prevention.map((measure, index) => (
+              {currentData.prevention.map((measure, index) => (
                 <li key={index} className="flex items-start gap-2">
                   <span className="text-primary mt-1">•</span>
                   <span className="text-foreground">{measure}</span>

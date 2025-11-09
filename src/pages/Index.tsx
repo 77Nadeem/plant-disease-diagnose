@@ -205,6 +205,10 @@ const Index = () => {
               data={analysisData} 
               language={language}
               imagePreview={imagePreview || ''}
+              onLanguageChange={(newLang, newData) => {
+                setLanguage(newLang);
+                setAnalysisData(newData);
+              }}
             />
           </div>
         )}
